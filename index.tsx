@@ -34,7 +34,12 @@ import {
   Star,
   Zap,
   ThumbsUp,
-  Wand2
+  Wand2,
+  Key,
+  Cpu,
+  Activity,
+  Globe,
+  Server
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
@@ -79,9 +84,19 @@ interface RecommendationResult {
   confidence: number;
 }
 
+interface AIConfig {
+  provider: 'gemini' | 'deepseek';
+  model: string;
+  temperature: number;
+  deepseekKey: string;
+  deepseekBaseUrl: string;
+  deepseekModel: string;
+}
+
 const STORAGE_KEY_PRODUCTS = 'SHANSHUI_DB_PRODUCTS_V25';
 const STORAGE_KEY_GIFTSETS = 'SHANSHUI_DB_GIFTSETS_V25';
 const STORAGE_KEY_AUTH = 'SHANSHUI_AUTH_V1';
+const STORAGE_KEY_AI_CONFIG = 'SHANSHUI_AI_CONFIG_V2'; // Bumped version for new schema
 
 const LOGO_URL = "https://img.lenyiin.com/app/hide.php?key=S0d4Y1N4YThGNkRHbnV4U1lrL1BBMDVncmc1Q1ZhZkZPR2c4dUg0PQ==";
 
@@ -208,8 +223,35 @@ function App() {
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [aiConfig, setAIConfig] = useState<AIConfig>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY_AI_CONFIG);
+    return saved ? JSON.parse(saved) : { 
+      provider: 'gemini',
+      model: 'gemini-3-flash-preview', 
+      temperature: 0.7,
+      deepseekKey: '',
+      deepseekBaseUrl: 'https://api.deepseek.com',
+      deepseekModel: 'deepseek-chat'
+    };
+  });
+
+  const [hasApiKey, setHasApiKey] = useState(false);
+
   useEffect(() => { localStorage.setItem(STORAGE_KEY_PRODUCTS, JSON.stringify(products)); }, [products]);
   useEffect(() => { localStorage.setItem(STORAGE_KEY_GIFTSETS, JSON.stringify(giftSets)); }, [giftSets]);
+  useEffect(() => { localStorage.setItem(STORAGE_KEY_AI_CONFIG, JSON.stringify(aiConfig)); }, [aiConfig]);
+
+  useEffect(() => {
+    const checkKey = async () => {
+      if (window.aistudio?.hasSelectedApiKey) {
+        const has = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(has);
+      }
+    };
+    checkKey();
+    const interval = setInterval(checkKey, 3000);
+    return () => clearInterval(interval);
+  }, []);
 
   const [currentSetId, setCurrentSetId] = useState<string | null>(null);
   const [activeTierId, setActiveTierId] = useState<string | null>(null);
@@ -223,6 +265,7 @@ function App() {
   const [isPackageModalOpen, setIsPackageModalOpen] = useState(false);
   const [isTierModalOpen, setIsTierModalOpen] = useState(false);
   const [isLibraryModalOpen, setIsLibraryModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   
   const [isAIModalOpen, setIsAIModalOpen] = useState(false);
   const [aiRequirement, setAIRequirement] = useState('');
@@ -271,7 +314,6 @@ function App() {
     e.preventDefault();
     if (loginForm.username === 'admin' && loginForm.password === 'zj123456') {
       setIsLoggedIn(true);
-      // Fix: localStorage.setItem requires key and value arguments, and it returns void (so comparison is invalid)
       localStorage.setItem(STORAGE_KEY_AUTH, 'true');
       setLoginError('');
     } else {
@@ -370,23 +412,18 @@ function App() {
   const handleExportScheme = () => {
     if (!currentSet) return;
     let csvContent = "\uFEFF"; 
-    // 头部字段 - 14个汇总列 + 5个产品详情列
     csvContent += "方案名称,档位营收价,选品折率,数量,非折扣零售总额,整体折扣率,折后展示总价,全采购成本,单套杂费,预估税额,单套全成本,单套净利,净利率,全案总投入,产品名称,SKU,零售单价,折后单价,采购单价\n";
     
     currentSet.tiers.forEach(tier => {
       const items = tier.selectedProductIds.map(id => products.find(p => p.id === id)).filter(Boolean) as Product[];
-      
       const revenuePerUnit = tier.targetTierPrice;
       const totalRetail = items.reduce((s, p) => s + p.retailPrice, 0); 
       const discountRateDecimal = tier.discountRate / 100;
       const overallDiscountRate = totalRetail > 0 ? (revenuePerUnit / totalRetail) * 100 : 0;
-      
       const productPresentationValue = totalRetail * discountRateDecimal; 
       const totalPlatformPurchaseCost = items.reduce((s, p) => s + p.platformPrice, 0);
-      
       const otherCosts = tier.boxCost + tier.laborCost + tier.logisticsCost;
       const taxAmount = (productPresentationValue + otherCosts) * (tier.taxRate / 100);
-      
       const totalUnitCost = totalPlatformPurchaseCost + otherCosts + taxAmount;
       const netProfit = revenuePerUnit - totalUnitCost;
       const marginPercentage = revenuePerUnit > 0 ? (netProfit / revenuePerUnit) * 100 : 0;
@@ -394,7 +431,6 @@ function App() {
 
       items.forEach((it, idx) => {
         if (idx === 0) {
-          // 第一行包含档位汇总数据
           const rowData = [
             currentSet.name,
             revenuePerUnit,
@@ -418,9 +454,8 @@ function App() {
           ];
           csvContent += rowData.join(',') + '\n';
         } else {
-          // 非第一行使用 14 个空列确保产品详情列精确对齐
           const rowData = [
-            ...new Array(14).fill(''), // 14个留白
+            ...new Array(14).fill(''), 
             `"${it.name}"`,
             it.sku,
             it.retailPrice,
@@ -537,16 +572,15 @@ function App() {
     setIsAIThinking(true);
     setAIRecommendations([]);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const contextProducts = products.slice(0, 150).map(p => ({ id: p.id, name: p.name, retailPrice: p.retailPrice, category: p.category }));
       
-      const prompt = `你是一个数字化礼赠选品专家。当前产品库有：${JSON.stringify(contextProducts)}。
+      const systemMsg = `你是一个数字化礼赠选品专家。当前产品库有：${JSON.stringify(contextProducts)}。
 目标档位预算：${aiActiveTier.targetTierPrice} 元。
 产品折扣率：${aiActiveTier.discountRate}%。
 客户特定需求："${aiRequirement || '寻找高性价比、美观的礼品组合'}"。
 
 请基于以上产品推荐 8 个最匹配的单品，并根据其适配程度给出匹配度分值。
-必须严格返回以下 JSON 格式：
+必须严格返回以下 JSON 格式（不要包含任何解释性文字）：
 {
   "recommendations": [
     {
@@ -557,41 +591,73 @@ function App() {
   ]
 }`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              recommendations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    productId: { type: Type.STRING },
-                    reason: { type: Type.STRING },
-                    confidence: { type: Type.INTEGER }
-                  },
-                  required: ["productId", "reason", "confidence"]
+      let data: any = {};
+
+      if (aiConfig.provider === 'gemini') {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const response = await ai.models.generateContent({
+          model: aiConfig.model,
+          contents: systemMsg,
+          config: {
+            temperature: aiConfig.temperature,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                recommendations: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      productId: { type: Type.STRING },
+                      reason: { type: Type.STRING },
+                      confidence: { type: Type.INTEGER }
+                    },
+                    required: ["productId", "reason", "confidence"]
+                  }
                 }
               }
             }
           }
+        });
+        data = JSON.parse(response.text || '{}');
+      } else {
+        // DeepSeek API Calling (OpenAI compatible)
+        const response = await fetch(`${aiConfig.deepseekBaseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${aiConfig.deepseekKey}`
+          },
+          body: JSON.stringify({
+            model: aiConfig.deepseekModel,
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant that only outputs JSON.' },
+              { role: 'user', content: systemMsg }
+            ],
+            temperature: aiConfig.temperature,
+            response_format: { type: 'json_object' }
+          })
+        });
+
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.error?.message || 'DeepSeek 请求失败');
         }
-      });
+
+        const resJson = await response.json();
+        data = JSON.parse(resJson.choices[0].message.content || '{}');
+      }
       
-      const data = JSON.parse(response.text || '{}');
       if (data.recommendations) {
         const validRecs = data.recommendations
           .filter((r: any) => products.some(p => p.id === r.productId))
           .sort((a: any, b: any) => b.confidence - a.confidence);
         setAIRecommendations(validRecs);
       }
-    } catch (error) { 
+    } catch (error: any) { 
       console.error("AI Error:", error); 
-      alert("AI 选品解析失败，请检查 API 配置。"); 
+      alert(`AI 选品解析失败: ${error.message}`);
     } finally { 
       setIsAIThinking(false); 
     }
@@ -606,6 +672,14 @@ function App() {
     const ids = aiRecommendations.slice(0, 3).map(r => r.productId);
     setGiftSets(prev => prev.map(s => s.id === currentSetId ? { ...s, tiers: s.tiers.map(t => t.id === aiActiveTier.id ? { ...t, selectedProductIds: [...t.selectedProductIds, ...ids] } : t) } : s));
     setIsAIModalOpen(false);
+  };
+
+  const handleOpenApiKeyDialog = async () => {
+    if (window.aistudio?.openSelectKey) {
+      await window.aistudio.openSelectKey();
+      const has = await window.aistudio.hasSelectedApiKey();
+      setHasApiKey(has);
+    }
   };
 
   if (!isLoggedIn) {
@@ -646,6 +720,7 @@ function App() {
         <div className="flex gap-2">
           {currentSet && <button onClick={handleExportScheme} className="flex items-center gap-2 bg-[#F9F7F2] border border-[#E5E1D1] text-[#1B4332] px-4 py-1.5 rounded-full font-bold text-[10px]"><FileSpreadsheet size={12} /> 导出报表</button>}
           <button onClick={() => setIsLibraryModalOpen(true)} className="flex items-center gap-2 bg-[#F9F7F2] border border-[#E5E1D1] text-[#1B4332] px-4 py-1.5 rounded-full font-bold text-[10px]"><Database size={12} /> 产品库</button>
+          <button onClick={() => setIsSettingsModalOpen(true)} className="flex items-center gap-2 bg-white border border-[#E5E1D1] text-gray-500 px-4 py-1.5 rounded-full font-bold text-[10px] hover:text-[#1B4332] hover:border-[#1B4332] transition-all"><Settings size={12} /> 设置</button>
           <button onClick={handleLogout} className="flex items-center gap-2 bg-white border border-[#E5E1D1] text-gray-400 px-4 py-1.5 rounded-full font-bold text-[10px]">退出</button>
           <button onClick={() => { setInputValue(''); setIsPackageModalOpen(true); }} className="flex items-center gap-2 bg-[#1B4332] text-white px-5 py-1.5 rounded-full font-bold text-[10px] shadow-lg"><Plus size={12} /> 新方案</button>
         </div>
@@ -719,32 +794,21 @@ function App() {
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
                 {currentSet.tiers.map(tier => {
                   const items = tier.selectedProductIds.map(id => products.find(p => p.id === id)).filter(Boolean) as Product[];
-                  
                   const revenuePerUnit = tier.targetTierPrice;
                   const totalRetail = items.reduce((s, p) => s + p.retailPrice, 0); 
                   const discountRateDecimal = tier.discountRate / 100;
-                  
-                  // 整体折扣率 (营收价 / 零售总价)
                   const overallDiscountRate = totalRetail > 0 ? (revenuePerUnit / totalRetail) * 100 : 0;
-                  
                   const productPresentationValue = totalRetail * discountRateDecimal; 
                   const totalPlatformPurchaseCost = items.reduce((s, p) => s + p.platformPrice, 0);
-                  
-                  // 统一核算逻辑：全额采购价核算
-                  const calculatedProductCost = totalPlatformPurchaseCost;
-
                   const otherCosts = tier.boxCost + tier.laborCost + tier.logisticsCost;
                   const taxAmount = (productPresentationValue + otherCosts) * (tier.taxRate / 100);
-                  
-                  const totalUnitCost = calculatedProductCost + otherCosts + taxAmount;
+                  const totalUnitCost = totalPlatformPurchaseCost + otherCosts + taxAmount;
                   const netProfit = revenuePerUnit - totalUnitCost;
                   const marginPercentage = revenuePerUnit > 0 ? (netProfit / revenuePerUnit) * 100 : 0;
-
                   const active = activeTierId === tier.id;
 
                   return (
                     <div key={tier.id} onClick={() => setActiveTierId(tier.id)} className={`bg-white rounded-[28px] border flex flex-col transition-all duration-300 relative overflow-hidden ${active ? 'border-[#1B4332] shadow-2xl ring-2 ring-[#1B4332]/10 scale-[1.02]' : 'border-[#E5E1D1] shadow-md hover:border-[#B08D57]'}`} style={{ minHeight: '620px' }}>
-                      
                       <div className={`px-6 py-4 flex flex-col shrink-0 ${active ? 'bg-[#1B4332] text-white' : 'bg-[#FDFCF8] border-b'}`}>
                         <div className="flex justify-between items-start mb-2">
                           <div>
@@ -861,17 +925,144 @@ function App() {
       </main>
 
       {/* MODALS */}
+      <Modal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} title="系统设置与 AI 配置" maxWidth="max-w-xl">
+        <div className="space-y-6">
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 px-1">
+               <Cpu size={14} className="text-[#B08D57]" />
+               <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">智能引擎引擎选择</h4>
+            </div>
+            <div className="flex p-1 bg-[#F9F7F2] rounded-2xl border border-[#E5E1D1]">
+              <button 
+                onClick={() => setAIConfig({ ...aiConfig, provider: 'gemini' })}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-bold transition-all ${aiConfig.provider === 'gemini' ? 'bg-[#1B4332] text-white shadow-lg' : 'text-gray-400 hover:text-[#1B4332]'}`}
+              >
+                <Activity size={14} /> Google Gemini
+              </button>
+              <button 
+                onClick={() => setAIConfig({ ...aiConfig, provider: 'deepseek' })}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-bold transition-all ${aiConfig.provider === 'deepseek' ? 'bg-[#1B4332] text-white shadow-lg' : 'text-gray-400 hover:text-[#1B4332]'}`}
+              >
+                <Globe size={14} /> DeepSeek AI
+              </button>
+            </div>
+          </section>
+
+          {aiConfig.provider === 'gemini' ? (
+            <section className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+              <div className="flex items-center gap-2 px-1">
+                 <Key size={14} className="text-[#B08D57]" />
+                 <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Google API 密钥</h4>
+              </div>
+              <div className={`p-5 rounded-[24px] border transition-all ${hasApiKey ? 'bg-green-50/50 border-green-100' : 'bg-amber-50/50 border-amber-100'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-3 h-3 rounded-full animate-pulse ${hasApiKey ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]'}`} />
+                    <span className="text-xs font-bold text-[#1B4332]">{hasApiKey ? '已连接至 Google AI' : '未配置 API 密钥'}</span>
+                  </div>
+                  <button onClick={handleOpenApiKeyDialog} className="bg-white border border-[#E5E1D1] text-[#1B4332] px-4 py-2 rounded-xl font-bold text-[10px] shadow-sm hover:border-[#1B4332] transition-all active:scale-95">
+                    {hasApiKey ? '更换密钥' : '立即绑定'}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-[9px] font-bold text-gray-400 block mb-2 uppercase">选品模型</label>
+                <select 
+                  className="w-full px-5 py-3 bg-[#F9F7F2] border border-[#E5E1D1] rounded-2xl text-xs font-bold outline-none focus:ring-2 focus:ring-[#1B4332]"
+                  value={aiConfig.model}
+                  onChange={(e) => setAIConfig({ ...aiConfig, model: e.target.value })}
+                >
+                  <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
+                  <option value="gemini-3-pro-preview">Gemini 3 Pro</option>
+                </select>
+              </div>
+            </section>
+          ) : (
+            <section className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+              <div className="flex items-center gap-2 px-1">
+                 <Server size={14} className="text-[#B08D57]" />
+                 <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">DeepSeek 接口配置</h4>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[9px] font-bold text-gray-400 block mb-2 uppercase">API Key</label>
+                  <div className="relative">
+                    <Key size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input 
+                      type="password"
+                      placeholder="sk-..."
+                      className="w-full pl-11 pr-5 py-3 bg-[#F9F7F2] border border-[#E5E1D1] rounded-2xl text-xs font-bold outline-none focus:ring-2 focus:ring-[#1B4332]"
+                      value={aiConfig.deepseekKey}
+                      onChange={(e) => setAIConfig({ ...aiConfig, deepseekKey: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[9px] font-bold text-gray-400 block mb-2 uppercase">Base URL</label>
+                  <input 
+                    type="text"
+                    placeholder="https://api.deepseek.com"
+                    className="w-full px-5 py-3 bg-[#F9F7F2] border border-[#E5E1D1] rounded-2xl text-xs font-bold outline-none focus:ring-2 focus:ring-[#1B4332]"
+                    value={aiConfig.deepseekBaseUrl}
+                    onChange={(e) => setAIConfig({ ...aiConfig, deepseekBaseUrl: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="text-[9px] font-bold text-gray-400 block mb-2 uppercase">模型名称</label>
+                  <input 
+                    type="text"
+                    placeholder="deepseek-chat"
+                    className="w-full px-5 py-3 bg-[#F9F7F2] border border-[#E5E1D1] rounded-2xl text-xs font-bold outline-none focus:ring-2 focus:ring-[#1B4332]"
+                    value={aiConfig.deepseekModel}
+                    onChange={(e) => setAIConfig({ ...aiConfig, deepseekModel: e.target.value })}
+                  />
+                </div>
+              </div>
+            </section>
+          )}
+
+          <section className="space-y-4">
+            <div className="flex justify-between items-center mb-2">
+              <label className="text-[9px] font-bold text-gray-400 uppercase">创意温度 (Temperature)</label>
+              <span className="text-[10px] font-bold text-[#1B4332]">{aiConfig.temperature}</span>
+            </div>
+            <input 
+              type="range" min="0" max="1" step="0.1" 
+              className="w-full accent-[#1B4332]"
+              value={aiConfig.temperature}
+              onChange={(e) => setAIConfig({ ...aiConfig, temperature: parseFloat(e.target.value) })}
+            />
+          </section>
+
+          <div className="pt-4 border-t border-gray-100">
+            <button onClick={() => setIsSettingsModalOpen(false)} className="w-full py-4 bg-[#1B4332] text-white rounded-2xl font-bold text-xs shadow-xl active:scale-95 transition-all">
+              保存配置并关闭
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       <Modal isOpen={isAIModalOpen} onClose={() => setIsAIModalOpen(false)} title="AI 专家选品解析" maxWidth="max-w-4xl">
         <div className="space-y-6">
           <div className="bg-[#FDFCF8] p-6 rounded-[32px] border border-[#E5E1D1] shadow-inner space-y-4">
-            <div className="flex items-center gap-3 mb-1">
-               <div className="p-3 bg-gradient-to-br from-[#1B4332] to-[#2D5A47] rounded-2xl text-white shadow-lg">
-                  <BrainCircuit size={24} className="animate-pulse" />
-               </div>
-               <div>
-                  <h4 className="text-sm font-bold text-[#1B4332] uppercase tracking-widest">智能选品工作台</h4>
-                  <p className="text-[10px] text-[#B08D57] font-medium italic">基于神经网络检索，为您的客户定制最佳礼赠组合</p>
-               </div>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-3">
+                <div className="p-3 bg-gradient-to-br from-[#1B4332] to-[#2D5A47] rounded-2xl text-white shadow-lg">
+                    <BrainCircuit size={24} className="animate-pulse" />
+                </div>
+                <div>
+                    <h4 className="text-sm font-bold text-[#1B4332] uppercase tracking-widest">智能选品工作台</h4>
+                    <p className="text-[10px] text-[#B08D57] font-medium italic">
+                      当前引擎: {aiConfig.provider === 'gemini' ? 'Google Gemini' : 'DeepSeek AI'}
+                    </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsSettingsModalOpen(true)}
+                className="text-xs text-[#B08D57] font-bold underline flex items-center gap-1"
+              >
+                <Settings size={12}/> 更改引擎
+              </button>
             </div>
             <div className="flex gap-4">
               <textarea 
@@ -882,7 +1073,7 @@ function App() {
               />
               <button 
                 onClick={handleAIRecommendation} 
-                disabled={isAIThinking || !aiRequirement.trim()} 
+                disabled={isAIThinking || !aiRequirement.trim() || (aiConfig.provider === 'deepseek' && !aiConfig.deepseekKey)} 
                 className="w-32 bg-[#1B4332] text-white rounded-[24px] font-black flex flex-col items-center justify-center gap-3 transition-all active:scale-95 shadow-2xl disabled:opacity-50 disabled:scale-100 hover:bg-[#2D5A47] relative overflow-hidden group/btn"
               >
                 {isAIThinking ? <Loader2 className="animate-spin" size={32} /> : <Sparkles size={40} className="text-amber-400 drop-shadow-lg group-hover/btn:scale-110 transition-transform" />}
@@ -890,17 +1081,22 @@ function App() {
                 <div className="absolute inset-0 bg-white/10 opacity-0 group-hover/btn:opacity-100 transition-opacity" />
               </button>
             </div>
+            {aiConfig.provider === 'deepseek' && !aiConfig.deepseekKey && (
+              <div className="flex items-center gap-2 text-red-500 text-[10px] font-bold pl-2">
+                <AlertCircle size={12}/> 请先在“设置”中配置 DeepSeek API Key
+              </div>
+            )}
           </div>
 
           {aiRecommendations.length > 0 && (
             <div className="space-y-4 animate-in fade-in slide-in-from-bottom-8 duration-700">
               <div className="flex items-center justify-between px-3">
                 <div className="flex items-center gap-3">
-                   <TrendingUp size={18} className="text-[#B08D57]"/>
-                   <span className="text-xs font-bold text-[#1B4332] uppercase tracking-widest">推荐方案 (匹配度优先排序)</span>
+                  <TrendingUp size={18} className="text-[#B08D57]"/>
+                  <span className="text-xs font-bold text-[#1B4332] uppercase tracking-widest">推荐方案 (匹配度优先排序)</span>
                 </div>
                 <div className="flex gap-2">
-                   <button onClick={applyAllRecommendations} className="px-4 py-1.5 bg-[#1B4332]/5 text-[#1B4332] border border-[#1B4332]/10 rounded-full text-[10px] font-bold hover:bg-[#1B4332] hover:text-white transition-all shadow-sm">一键采纳前三</button>
+                  <button onClick={applyAllRecommendations} className="px-4 py-1.5 bg-[#1B4332]/5 text-[#1B4332] border border-[#1B4332]/10 rounded-full text-[10px] font-bold hover:bg-[#1B4332] hover:text-white transition-all shadow-sm">一键采纳前三</button>
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -908,20 +1104,19 @@ function App() {
                   const p = products.find(prod => prod.id === rec.productId);
                   if (!p) return null;
                   const scoreColor = rec.confidence >= 90 ? 'text-green-600 bg-green-50' : 'text-amber-600 bg-amber-50';
-                  
                   return (
                     <div key={i} className="bg-white border border-[#E5E1D1] p-4 rounded-[24px] flex gap-4 group hover:border-[#1B4332] transition-all shadow-sm hover:shadow-xl relative overflow-hidden">
                       <div className={`absolute top-0 right-0 px-4 py-1.5 ${scoreColor} text-[10px] font-black rounded-bl-[20px] shadow-sm flex items-center gap-1`}>
                         <ThumbsUp size={10} /> {rec.confidence}% 匹配
                       </div>
                       <div className="relative shrink-0">
-                         <ProductImage src={p.image} className="w-20 h-20 rounded-[20px] object-cover border" />
-                         <button 
+                        <ProductImage src={p.image} className="w-20 h-20 rounded-[20px] object-cover border" />
+                        <button 
                             onClick={(e) => { e.stopPropagation(); applySingleRecommendation(p.id); }}
                             className="absolute -bottom-1 -right-1 bg-[#1B4332] text-white p-1.5 rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-opacity"
-                         >
+                        >
                             <Plus size={14}/>
-                         </button>
+                        </button>
                       </div>
                       <div className="flex-1 min-w-0 pr-16 pt-1">
                         <div className="flex items-center gap-2 mb-1">
@@ -976,12 +1171,7 @@ function App() {
       <Modal isOpen={isLibraryModalOpen} onClose={() => setIsLibraryModalOpen(false)} title="数字化产品库资源中心" maxWidth="max-w-[95vw]">
          <div className="flex flex-col h-[75vh] gap-4">
            <div className="flex gap-3 bg-[#F9F7F2] p-4 rounded-3xl border border-[#E5E1D1] shrink-0">
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="bg-[#1B4332] text-white px-6 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 hover:bg-[#2D5A47] transition-all shadow-xl"
-              >
-                <FileUp size={16} /> 批量导入 CSV 数据 (UTF-8/GBK)
-              </button>
+              <button onClick={() => fileInputRef.current?.click()} className="bg-[#1B4332] text-white px-6 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 hover:bg-[#2D5A47] transition-all shadow-xl"><FileUp size={16} /> 批量导入 CSV 数据 (UTF-8/GBK)</button>
               <input type="file" ref={fileInputRef} accept=".csv" className="hidden" onChange={handleFileUpload} />
               <button onClick={() => setProducts([{ id: Date.now().toString() + Math.random().toString(36).substr(2, 5), sku: 'NEW-'+Math.floor(Math.random()*1000), name: '待完善新选品', spec: '', unit: '件', platformPrice: 0, channelPrice: 0, retailPrice: 0, image: '', manufacturer: '', category: '默认' }, ...products])} className="bg-white border border-[#E5E1D1] text-[#1B4332] px-6 py-3 rounded-2xl font-bold text-xs hover:border-[#1B4332] transition-all shadow-sm">手动录入单品</button>
            </div>
@@ -1035,6 +1225,8 @@ function App() {
           50% { opacity: 0.8; transform: scale(0.98); }
         }
         .ai-pulse { animation: subtle-pulse 2s infinite ease-in-out; }
+
+        select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23B08D57'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 1rem center; background-size: 1rem; }
       `}</style>
     </div>
   );
