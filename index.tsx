@@ -26,10 +26,15 @@ import {
   BrainCircuit,
   Receipt,
   TrendingUp,
+  TrendingDown,
   Coins,
   Calculator,
   Info,
-  ShieldCheck
+  ShieldCheck,
+  Star,
+  Zap,
+  ThumbsUp,
+  Wand2
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
@@ -266,6 +271,7 @@ function App() {
     e.preventDefault();
     if (loginForm.username === 'admin' && loginForm.password === 'zj123456') {
       setIsLoggedIn(true);
+      // Fix: localStorage.setItem requires key and value arguments, and it returns void (so comparison is invalid)
       localStorage.setItem(STORAGE_KEY_AUTH, 'true');
       setLoginError('');
     } else {
@@ -364,27 +370,72 @@ function App() {
   const handleExportScheme = () => {
     if (!currentSet) return;
     let csvContent = "\uFEFF"; 
-    csvContent += "方案名称,档位预算,选品折扣,数量,产品名称,SKU,零售价,折后价,采购价,渠道价,单套全成本,全案总额\n";
+    // 头部字段 - 14个汇总列 + 5个产品详情列
+    csvContent += "方案名称,档位营收价,选品折率,数量,非折扣零售总额,整体折扣率,折后展示总价,全采购成本,单套杂费,预估税额,单套全成本,单套净利,净利率,全案总投入,产品名称,SKU,零售单价,折后单价,采购单价\n";
+    
     currentSet.tiers.forEach(tier => {
       const items = tier.selectedProductIds.map(id => products.find(p => p.id === id)).filter(Boolean) as Product[];
-      const totalRetail = items.reduce((s, p) => s + p.retailPrice, 0);
-      const productDiscountedPrice = totalRetail * (tier.discountRate / 100);
-      const otherCosts = tier.boxCost + tier.laborCost + tier.logisticsCost;
-      const untaxedSettlement = productDiscountedPrice + otherCosts;
-      const unitSettlement = untaxedSettlement * (1 + tier.taxRate / 100);
       
+      const revenuePerUnit = tier.targetTierPrice;
+      const totalRetail = items.reduce((s, p) => s + p.retailPrice, 0); 
+      const discountRateDecimal = tier.discountRate / 100;
+      const overallDiscountRate = totalRetail > 0 ? (revenuePerUnit / totalRetail) * 100 : 0;
+      
+      const productPresentationValue = totalRetail * discountRateDecimal; 
+      const totalPlatformPurchaseCost = items.reduce((s, p) => s + p.platformPrice, 0);
+      
+      const otherCosts = tier.boxCost + tier.laborCost + tier.logisticsCost;
+      const taxAmount = (productPresentationValue + otherCosts) * (tier.taxRate / 100);
+      
+      const totalUnitCost = totalPlatformPurchaseCost + otherCosts + taxAmount;
+      const netProfit = revenuePerUnit - totalUnitCost;
+      const marginPercentage = revenuePerUnit > 0 ? (netProfit / revenuePerUnit) * 100 : 0;
+      const totalProjectInvestment = totalUnitCost * tier.quantity;
+
       items.forEach((it, idx) => {
         if (idx === 0) {
-          csvContent += `${currentSet.name},${tier.targetTierPrice},${tier.discountRate}%,${tier.quantity},"${it.name}",${it.sku},${it.retailPrice},${(it.retailPrice * (tier.discountRate/100)).toFixed(2)},${it.platformPrice},${it.channelPrice},${unitSettlement.toFixed(2)},${(unitSettlement * tier.quantity).toFixed(2)}\n`;
+          // 第一行包含档位汇总数据
+          const rowData = [
+            currentSet.name,
+            revenuePerUnit,
+            `${tier.discountRate}%`,
+            tier.quantity,
+            totalRetail.toFixed(2),
+            `${overallDiscountRate.toFixed(2)}%`,
+            productPresentationValue.toFixed(2),
+            totalPlatformPurchaseCost.toFixed(2),
+            otherCosts.toFixed(2),
+            taxAmount.toFixed(2),
+            totalUnitCost.toFixed(2),
+            netProfit.toFixed(2),
+            `${marginPercentage.toFixed(2)}%`,
+            totalProjectInvestment.toFixed(2),
+            `"${it.name}"`,
+            it.sku,
+            it.retailPrice,
+            (it.retailPrice * discountRateDecimal).toFixed(2),
+            it.platformPrice
+          ];
+          csvContent += rowData.join(',') + '\n';
         } else {
-          csvContent += `,,, ,"${it.name}",${it.sku},${it.retailPrice},${(it.retailPrice * (tier.discountRate/100)).toFixed(2)},${it.platformPrice},${it.channelPrice},,, \n`;
+          // 非第一行使用 14 个空列确保产品详情列精确对齐
+          const rowData = [
+            ...new Array(14).fill(''), // 14个留白
+            `"${it.name}"`,
+            it.sku,
+            it.retailPrice,
+            (it.retailPrice * discountRateDecimal).toFixed(2),
+            it.platformPrice
+          ];
+          csvContent += rowData.join(',') + '\n';
         }
       });
     });
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.setAttribute("href", URL.createObjectURL(blob));
-    link.setAttribute("download", `方案报表_${currentSet.name}.csv`);
+    link.setAttribute("download", `方案报表_${currentSet.name}_${new Date().toLocaleDateString()}.csv`);
     link.click();
   };
 
@@ -487,10 +538,24 @@ function App() {
     setAIRecommendations([]);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const contextProducts = products.slice(0, 50).map(p => ({ id: p.id, name: p.name, price: p.retailPrice, category: p.category }));
+      const contextProducts = products.slice(0, 150).map(p => ({ id: p.id, name: p.name, retailPrice: p.retailPrice, category: p.category }));
+      
       const prompt = `你是一个数字化礼赠选品专家。当前产品库有：${JSON.stringify(contextProducts)}。
-目标预算单价：${aiActiveTier.targetTierPrice} 元。客户需求："${aiRequirement}"。
-请基于以上产品推荐3个最合适的产品。`;
+目标档位预算：${aiActiveTier.targetTierPrice} 元。
+产品折扣率：${aiActiveTier.discountRate}%。
+客户特定需求："${aiRequirement || '寻找高性价比、美观的礼品组合'}"。
+
+请基于以上产品推荐 8 个最匹配的单品，并根据其适配程度给出匹配度分值。
+必须严格返回以下 JSON 格式：
+{
+  "recommendations": [
+    {
+      "productId": "必须是产品库中的真实ID",
+      "reason": "推荐理由（20字以内）",
+      "confidence": 0-100之间的整数（表示匹配度）
+    }
+  ]
+}`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
@@ -507,27 +572,38 @@ function App() {
                   properties: {
                     productId: { type: Type.STRING },
                     reason: { type: Type.STRING },
-                    confidence: { type: Type.NUMBER }
-                  }
+                    confidence: { type: Type.INTEGER }
+                  },
+                  required: ["productId", "reason", "confidence"]
                 }
               }
             }
           }
         }
       });
+      
       const data = JSON.parse(response.text || '{}');
-      if (data.recommendations) setAIRecommendations(data.recommendations);
+      if (data.recommendations) {
+        const validRecs = data.recommendations
+          .filter((r: any) => products.some(p => p.id === r.productId))
+          .sort((a: any, b: any) => b.confidence - a.confidence);
+        setAIRecommendations(validRecs);
+      }
     } catch (error) { 
       console.error("AI Error:", error); 
-      alert("AI 选品解析失败，请检查网络或稍后重试。"); 
+      alert("AI 选品解析失败，请检查 API 配置。"); 
     } finally { 
       setIsAIThinking(false); 
     }
   };
 
-  const applyAIRecommendation = () => {
+  const applySingleRecommendation = (pid: string) => {
+    addToTier(pid);
+  };
+
+  const applyAllRecommendations = () => {
     if (!aiActiveTier || aiRecommendations.length === 0) return;
-    const ids = aiRecommendations.map(r => r.productId).filter(id => products.some(p => p.id === id));
+    const ids = aiRecommendations.slice(0, 3).map(r => r.productId);
     setGiftSets(prev => prev.map(s => s.id === currentSetId ? { ...s, tiers: s.tiers.map(t => t.id === aiActiveTier.id ? { ...t, selectedProductIds: [...t.selectedProductIds, ...ids] } : t) } : s));
     setIsAIModalOpen(false);
   };
@@ -542,7 +618,7 @@ function App() {
               <img src={LOGO_URL} alt="Logo" className="w-16 h-16 object-contain" />
             </div>
             <h1 className="text-4xl font-serif font-bold text-[#1B4332] mb-2 tracking-tight">藏镜山水</h1>
-            <p className="text-[11px] text-[#B08D57] font-bold tracking-[0.2em] uppercase italic">GIFT DESIGN SYSTEM</p>
+            <p className="text-[11px] text-[#B08D57] font-bold tracking-[0.2em] uppercase italic">数字化礼赠设计平台</p>
           </div>
           <form onSubmit={handleLogin} className="space-y-6">
             <input type="text" placeholder="管理员账号" className="w-full px-6 py-4 bg-[#F9F7F2] border border-[#E5E1D1] rounded-[24px] outline-none" value={loginForm.username} onChange={(e) => setLoginForm({...loginForm, username: e.target.value})} />
@@ -586,16 +662,30 @@ function App() {
               <FilterRow label="分类" icon={Layers} items={categories} activeItem={activeCategory} onSelect={setActiveCategory} />
             </div>
             <div className="flex-1 overflow-y-auto p-2.5 space-y-2 custom-scrollbar bg-[#FDFCF8]/30">
-              {sortedFilteredProducts.map(p => (
-                <div key={p.id} onClick={() => activeTierId && addToTier(p.id)} className={`group relative bg-white border rounded-xl p-2 flex gap-2.5 cursor-pointer transition-all ${!activeTierId ? 'opacity-40 cursor-not-allowed' : 'hover:border-[#1B4332] shadow-sm'} ${lastAddedId === p.id ? 'ring-2 ring-[#1B4332]' : 'border-[#E5E1D1]'}`}>
-                  <ProductImage src={p.image} name={p.name} className="w-10 h-10 rounded-lg object-cover shrink-0 border" onHover={handleImageHover} />
-                  <div className="flex-1 min-w-0 flex flex-col justify-center">
-                    <h4 className="text-[10px] font-bold text-[#1B4332] truncate leading-tight">{p.name}</h4>
-                    <p className="text-[8px] text-[#B08D57] font-bold mt-0.5">零售: ¥{p.retailPrice}</p>
+              {sortedFilteredProducts.map(p => {
+                const isAIRec = aiRecommendations.some(r => r.productId === p.id);
+                return (
+                  <div 
+                    key={p.id} 
+                    onClick={() => activeTierId && addToTier(p.id)} 
+                    className={`group relative bg-white border rounded-xl p-2 flex gap-2.5 cursor-pointer transition-all ${!activeTierId ? 'opacity-40 cursor-not-allowed' : 'hover:border-[#1B4332] shadow-sm'} ${lastAddedId === p.id ? 'ring-2 ring-[#1B4332]' : 'border-[#E5E1D1]'} ${isAIRec ? 'border-[#B08D57] bg-amber-50/30' : ''}`}
+                  >
+                    <ProductImage src={p.image} name={p.name} className="w-10 h-10 rounded-lg object-cover shrink-0 border" onHover={handleImageHover} />
+                    <div className="flex-1 min-w-0 flex flex-col justify-center">
+                      <div className="flex items-center gap-1 overflow-hidden">
+                        <h4 className="text-[10px] font-bold text-[#1B4332] truncate leading-tight">{p.name}</h4>
+                        {isAIRec && <Star size={8} className="text-[#B08D57] fill-[#B08D57] shrink-0" />}
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <p className="text-[8px] text-[#B08D57] font-bold">零售: ¥{p.retailPrice}</p>
+                        <p className="text-[8px] text-gray-400 font-bold bg-gray-100 px-1 rounded">采购: ¥{p.platformPrice}</p>
+                      </div>
+                    </div>
+                    {isAIRec && <div className="absolute -top-1.5 -left-1.5 bg-[#B08D57] text-white text-[6px] px-1 rounded flex items-center gap-0.5 font-bold shadow-sm animate-pulse"><Zap size={6}/> AI推荐品</div>}
+                    {activeTierId && <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1B4332] text-white p-0.5 rounded-full"><Plus size={10}/></div>}
                   </div>
-                  {activeTierId && <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1B4332] text-white p-0.5 rounded-full"><Plus size={10}/></div>}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </aside>
         )}
@@ -630,85 +720,62 @@ function App() {
                 {currentSet.tiers.map(tier => {
                   const items = tier.selectedProductIds.map(id => products.find(p => p.id === id)).filter(Boolean) as Product[];
                   
-                  // --- 进阶财务模型计算 ---
                   const revenuePerUnit = tier.targetTierPrice;
                   const totalRetail = items.reduce((s, p) => s + p.retailPrice, 0); 
                   const discountRateDecimal = tier.discountRate / 100;
                   
-                  // 客户端展示价值 (选品折后价)
-                  const productPresentationValue = totalRetail * discountRateDecimal; 
+                  // 整体折扣率 (营收价 / 零售总价)
+                  const overallDiscountRate = totalRetail > 0 ? (revenuePerUnit / totalRetail) * 100 : 0;
                   
-                  // 成本核算规则：
-                  // 1. 如果折后价 <= 500, 产品成本 = 实际折后价
-                  // 2. 如果折后价 > 500, 产品成本 = 500 + (全额采购价中超出500额度对应的比例)
-                  // 用户逻辑理解：超出500的部分，采购费全计入。
-                  // 计算：全额采购成本
+                  const productPresentationValue = totalRetail * discountRateDecimal; 
                   const totalPlatformPurchaseCost = items.reduce((s, p) => s + p.platformPrice, 0);
                   
-                  let calculatedProductCost = 0;
-                  const isThresholdTriggered = productPresentationValue > 500;
-
-                  if (!isThresholdTriggered) {
-                    calculatedProductCost = productPresentationValue;
-                  } else {
-                    // 超出500部分按实际采购价计。
-                    // 逻辑：成本 = 500元对应的折后成本 (其实就是500) + 全额采购价中溢出的部分。
-                    // 这里的采购价溢出部分：由于500是折后价，我们要找到对应的采购价比例。
-                    // 简化实现：超出500部分的折后价值部分，直接强制使用采购价来对冲成本风险。
-                    calculatedProductCost = totalPlatformPurchaseCost; 
-                  }
+                  // 统一核算逻辑：全额采购价核算
+                  const calculatedProductCost = totalPlatformPurchaseCost;
 
                   const otherCosts = tier.boxCost + tier.laborCost + tier.logisticsCost;
                   const taxAmount = (productPresentationValue + otherCosts) * (tier.taxRate / 100);
                   
-                  // 最终单套总核算成本
                   const totalUnitCost = calculatedProductCost + otherCosts + taxAmount;
-                  
-                  // 净利与净利率
                   const netProfit = revenuePerUnit - totalUnitCost;
                   const marginPercentage = revenuePerUnit > 0 ? (netProfit / revenuePerUnit) * 100 : 0;
-
-                  // 预算表现 (折后+杂+税)
-                  const totalPackagePresentation = productPresentationValue + otherCosts + taxAmount;
-                  const budgetVariance = totalPackagePresentation - revenuePerUnit;
-                  const isOverBudget = budgetVariance > 5;
 
                   const active = activeTierId === tier.id;
 
                   return (
                     <div key={tier.id} onClick={() => setActiveTierId(tier.id)} className={`bg-white rounded-[28px] border flex flex-col transition-all duration-300 relative overflow-hidden ${active ? 'border-[#1B4332] shadow-2xl ring-2 ring-[#1B4332]/10 scale-[1.02]' : 'border-[#E5E1D1] shadow-md hover:border-[#B08D57]'}`} style={{ minHeight: '620px' }}>
                       
-                      {/* Header Section */}
                       <div className={`px-6 py-4 flex flex-col shrink-0 ${active ? 'bg-[#1B4332] text-white' : 'bg-[#FDFCF8] border-b'}`}>
                         <div className="flex justify-between items-start mb-2">
                           <div>
-                            <p className="text-sm font-bold opacity-60 uppercase tracking-[0.1em]">{tier.quantity}套 采购规模</p>
-                            <h3 className="text-2xl font-black font-serif">¥{tier.targetTierPrice} <span className="text-xs font-normal">目标预算档</span></h3>
+                            <p className="text-sm font-bold opacity-60 uppercase tracking-[0.1em]">{tier.quantity}套 规模</p>
+                            <h3 className="text-2xl font-black font-serif">¥{tier.targetTierPrice} <span className="text-xs font-normal">预算档</span></h3>
                           </div>
-                          <div className="flex gap-1.5">
-                            <button onClick={(e) => { e.stopPropagation(); setAIActiveTier(tier); setIsAIModalOpen(true); }} className={`p-2 rounded-xl transition-all ${active ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-100 hover:bg-gray-200'}`} title="AI选品推荐"><BrainCircuit size={14}/></button>
-                            <button onClick={(e) => { e.stopPropagation(); handleOpenTierSettings(tier); }} className={`p-2 rounded-xl transition-all ${active ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-100 hover:bg-gray-200'}`} title="修改配置"><Settings size={14}/></button>
-                            <button onClick={(e) => { e.stopPropagation(); if(confirm('确定移除此档位？')) setGiftSets(prev => prev.map(s => s.id === currentSetId ? { ...s, tiers: s.tiers.filter(t => t.id !== tier.id) } : s)); }} className={`p-2 rounded-xl transition-all ${active ? 'bg-red-500/30 hover:bg-red-500' : 'bg-red-50 text-red-500 hover:bg-red-100'}`} title="删除"><Trash2 size={14}/></button>
+                          <div className="flex gap-1.5 items-center">
+                            <button onClick={(e) => { e.stopPropagation(); setAIActiveTier(tier); setIsAIModalOpen(true); }} className={`group relative px-4 py-2 rounded-xl transition-all flex items-center gap-2 font-bold text-[10px] overflow-hidden ${active ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-[#1B4332] shadow-lg shadow-amber-500/30' : 'bg-white text-[#1B4332] border border-[#E5E1D1]'}`} title="AI选品解析">
+                              <Sparkles size={14} className={active ? "animate-pulse" : ""} />
+                              <span>AI 智能选品</span>
+                              <div className="absolute inset-0 bg-white/20 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-500 skew-x-[-20deg]" />
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); handleOpenTierSettings(tier); }} className={`p-2 rounded-xl transition-all ${active ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-100 hover:bg-gray-200'}`} title="修改"><Settings size={14}/></button>
+                            <button onClick={(e) => { e.stopPropagation(); if(confirm('删除此档位？')) setGiftSets(prev => prev.map(s => s.id === currentSetId ? { ...s, tiers: s.tiers.filter(t => t.id !== tier.id) } : s)); }} className={`p-2 rounded-xl transition-all ${active ? 'bg-red-500/30 hover:bg-red-500' : 'bg-red-50 text-red-500 hover:bg-red-100'}`} title="删除"><Trash2 size={14}/></button>
                           </div>
                         </div>
                         <div className="flex items-center gap-3">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${active ? 'bg-white/20 text-white' : 'bg-[#B08D57]/10 text-[#B08D57]'}`}>
-                            产品折率: {tier.discountRate}%
+                            选品折率: {tier.discountRate}%
                           </span>
-                          {isThresholdTriggered && (
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${active ? 'bg-amber-400 text-[#1B4332]' : 'bg-amber-100 text-amber-700'}`}>
-                              <ShieldCheck size={10} /> 成本保护已激活
-                            </span>
-                          )}
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${active ? 'bg-amber-100 text-[#1B4332]' : 'bg-[#1B4332] text-white shadow-sm'}`}>
+                            <TrendingDown size={10} /> 整体折扣: {overallDiscountRate.toFixed(1)}%
+                          </span>
                         </div>
                       </div>
 
-                      {/* Content Section - Products */}
                       <div className="h-[200px] overflow-y-auto p-4 space-y-2.5 custom-scrollbar bg-[#FDFCF8]/30 border-b shrink-0">
                         {items.length === 0 ? (
                           <div className="h-full flex flex-col items-center justify-center text-gray-300 opacity-60">
-                             <Sparkles size={24} className="mb-2 text-[#B08D57]" />
-                             <p className="text-xs font-bold tracking-widest uppercase">请从左侧产品库中添加选品</p>
+                             <Wand2 size={24} className="mb-2 text-[#B08D57] animate-bounce" />
+                             <p className="text-xs font-bold tracking-widest uppercase">请从左侧添加或点击 AI 选品</p>
                           </div>
                         ) : items.map((it, idx) => (
                           <div key={idx} className="flex items-center gap-3 p-2.5 bg-white border border-gray-100 rounded-xl group/item shadow-sm hover:border-[#1B4332] transition-all">
@@ -725,88 +792,60 @@ function App() {
                         ))}
                       </div>
 
-                      {/* Financial Analysis Section */}
                       <div className="p-5 flex-1 flex flex-col justify-between bg-white overflow-hidden space-y-4">
                         <div className="space-y-4">
-                          <div className="flex justify-between items-center">
-                            <div className={`py-1 px-3 rounded-xl flex items-center gap-2 text-[9px] font-black uppercase tracking-widest border ${isOverBudget ? 'bg-red-50 text-red-500 border-red-100' : 'bg-green-50 text-green-600 border-green-100'}`}>
-                               {isOverBudget ? <AlertTriangle size={12}/> : <CheckCircle2 size={12}/>}
-                               {isOverBudget ? '方案已超支' : '预算模型合规'}
+                          <div className="flex flex-wrap gap-4 items-center justify-between px-1">
+                            <div className="text-left">
+                               <p className="text-[8px] text-gray-400 font-bold uppercase tracking-tighter">折后展示价</p>
+                               <p className="text-sm font-black text-[#1B4332]">¥{productPresentationValue.toFixed(1)}</p>
+                            </div>
+                            <div className="text-center">
+                               <p className="text-[8px] text-gray-400 font-bold uppercase tracking-tighter">非折扣零售额</p>
+                               <p className="text-sm font-bold text-gray-400 line-through">¥{totalRetail.toFixed(1)}</p>
                             </div>
                             <div className="text-right">
-                               <p className="text-[8px] text-gray-400 font-bold uppercase tracking-tighter">折后展示价(选品)</p>
-                               <p className="text-sm font-black text-[#1B4332]">¥{productPresentationValue.toFixed(1)}</p>
+                               <p className="text-[8px] text-gray-400 font-bold uppercase tracking-tighter">全采购成本</p>
+                               <p className="text-sm font-black text-[#1B4332]">¥{totalPlatformPurchaseCost.toFixed(1)}</p>
                             </div>
                           </div>
 
                           <div className="grid grid-cols-2 gap-x-4 gap-y-2 py-3 border-y border-gray-50">
-                             <div className="flex justify-between text-[10px]">
-                               <span className="text-gray-400">采购成本(全):</span>
-                               <span className="text-[#1B4332] font-black">¥{totalPlatformPurchaseCost.toFixed(1)}</span>
-                             </div>
-                             <div className="flex justify-between text-[10px] pl-4 border-l border-gray-100">
-                               <span className="text-gray-400">杂费成本:</span>
-                               <span className="text-[#1B4332] font-black">¥{otherCosts.toFixed(1)}</span>
-                             </div>
-                             <div className="flex justify-between text-[10px]">
-                               <span className="text-gray-400">预估税额:</span>
-                               <span className="text-[#1B4332] font-black">¥{taxAmount.toFixed(1)}</span>
-                             </div>
-                             <div className="flex justify-between text-[10px] pl-4 border-l border-gray-100">
-                               <span className="text-gray-400">预算偏差:</span>
-                               <span className={`font-black ${budgetVariance > 0 ? 'text-red-500' : 'text-green-600'}`}>
-                                 {budgetVariance > 0 ? '+' : ''}{budgetVariance.toFixed(1)}
-                               </span>
-                             </div>
+                             <div className="flex justify-between text-[10px]"><span className="text-gray-400">核算基准:</span><span className="text-[#1B4332] font-black">采购成本</span></div>
+                             <div className="flex justify-between text-[10px] pl-4 border-l border-gray-100"><span className="text-gray-400">整体折扣:</span><span className="text-[#B08D57] font-black">{overallDiscountRate.toFixed(1)}%</span></div>
+                             <div className="flex justify-between text-[10px]"><span className="text-gray-400">预估税额:</span><span className="text-[#1B4332] font-black">¥{taxAmount.toFixed(1)}</span></div>
+                             <div className="flex justify-between text-[10px] pl-4 border-l border-gray-100"><span className="text-gray-400">全成本:</span><span className="text-[#B08D57] font-black">¥{totalUnitCost.toFixed(1)}</span></div>
                           </div>
 
                           <div className="space-y-3">
-                             <span className="text-[10px] font-bold text-[#B08D57] uppercase tracking-wider flex items-center gap-1.5">
-                               <TrendingUp size={12}/> 核心核算模型透视
-                             </span>
-                             
-                             <div className="grid grid-cols-3 gap-2">
-                                <div className="bg-[#FDFCF8] rounded-2xl border border-gray-100 p-3 text-center shadow-inner">
-                                   <p className="text-[8px] text-gray-400 font-bold uppercase mb-1 scale-90">核算总成本</p>
-                                   <p className="text-sm font-black text-[#B08D57]">¥{totalUnitCost.toFixed(1)}</p>
-                                </div>
+                             <div className="grid grid-cols-2 gap-2">
                                 <div className="bg-[#1B4332]/5 rounded-2xl border border-[#1B4332]/10 p-3 text-center shadow-inner">
-                                   <p className="text-[8px] text-[#1B4332]/60 font-bold uppercase mb-1 scale-90">预估净利</p>
-                                   <p className={`text-sm font-black ${netProfit > 0 ? 'text-[#1B4332]' : 'text-red-500'}`}>¥{netProfit.toFixed(1)}</p>
+                                   <p className="text-[8px] text-[#1B4332]/60 font-bold uppercase mb-1">单套预估净利</p>
+                                   <p className={`text-xl font-black ${netProfit > 0 ? 'text-[#1B4332]' : 'text-red-500'}`}>¥{netProfit.toFixed(1)}</p>
                                 </div>
                                 <div className="bg-[#FDFCF8] rounded-2xl border border-gray-100 p-3 text-center shadow-inner">
-                                   <p className="text-[8px] text-gray-400 font-bold uppercase mb-1 scale-90">净利率</p>
-                                   <p className="text-sm font-black text-[#1B4332]">{marginPercentage.toFixed(1)}%</p>
+                                   <p className="text-[8px] text-gray-400 font-bold uppercase mb-1">净利率</p>
+                                   <p className="text-xl font-black text-[#1B4332]">{marginPercentage.toFixed(1)}%</p>
                                 </div>
                              </div>
-                             <div className="bg-gray-50 rounded-xl p-2.5 flex items-start gap-2 border border-gray-100">
-                                <Info size={12} className="text-gray-400 shrink-0 mt-0.5" />
-                                <p className="text-[9px] text-gray-400 leading-relaxed font-medium">
-                                  {isThresholdTriggered 
-                                    ? "选品折后价 > 500元：产品成本强制转为按全额采购价核算，以保护项目利润空间。" 
-                                    : "选品折后价 <= 500元：成本基于实际设定的折扣率进行核算。"}
+                             <div className="bg-[#1B4332]/5 rounded-xl p-2.5 flex items-start gap-2 border border-[#1B4332]/10">
+                                <Info size={12} className="text-[#1B4332] shrink-0 mt-0.5" />
+                                <p className="text-[9px] text-[#1B4332] leading-relaxed font-medium">
+                                  财务核算已统一：系统当前强制按照“全额采购价”作为选品成本底线，不考虑折后展示价值。
                                 </p>
                              </div>
                           </div>
                         </div>
 
-                        {/* Footer Summary */}
                         <div className="pt-4 border-t border-gray-100 space-y-3">
                            <div className="flex justify-between items-end px-1">
-                              <div>
-                                 <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-1.5 mb-1">
-                                    市场零售总额
-                                 </p>
-                                 <p className="text-sm font-black text-[#1B4332] opacity-20 line-through italic">¥{totalRetail.toFixed(1)}</p>
-                              </div>
-                              <div className="text-right flex-1 pl-4">
-                                 <p className="text-[9px] text-[#B08D57] font-black uppercase tracking-tight mb-1">单套预算收入 (营收)</p>
+                              <div className="text-left flex-1">
+                                 <p className="text-[9px] text-[#B08D57] font-black uppercase tracking-tight mb-1">目标单套营收</p>
                                  <p className="text-3xl font-black text-[#1B4332] leading-none tracking-tighter">¥{revenuePerUnit}</p>
                               </div>
                            </div>
                            <div className="bg-[#1B4332] text-white rounded-2xl py-3 px-4 flex justify-between items-center shadow-xl">
                               <span className="text-[10px] font-bold uppercase tracking-widest opacity-80 flex items-center gap-2">
-                                <Calculator size={14} /> 全案总投入核算
+                                <Calculator size={14} /> 全案核算总投入
                               </span>
                               <span className="text-lg font-black">¥{(totalUnitCost * tier.quantity).toLocaleString()}</span>
                            </div>
@@ -822,31 +861,82 @@ function App() {
       </main>
 
       {/* MODALS */}
-      <Modal isOpen={isAIModalOpen} onClose={() => setIsAIModalOpen(false)} title="AI 专家选品解析" maxWidth="max-w-xl">
-        <div className="space-y-4">
-          <div className="flex gap-2">
-              <textarea placeholder="描述需求主题，如：宋代美学、中秋商务、客户偏好绿色..." className="flex-1 h-20 px-4 py-3 bg-[#F9F7F2] border border-[#E5E1D1] rounded-xl outline-none text-xs resize-none shadow-inner" value={aiRequirement} onChange={(e) => setAIRequirement(e.target.value)} />
-              <button onClick={handleAIRecommendation} disabled={isAIThinking || !aiRequirement.trim()} className="w-20 bg-[#1B4332] text-white rounded-xl font-bold flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-lg">
-                {isAIThinking ? <Loader2 className="animate-spin" size={20} /> : <BrainCircuit size={24} />}
-                <span className="text-[9px]">{isAIThinking ? '解析中' : '开始解析'}</span>
+      <Modal isOpen={isAIModalOpen} onClose={() => setIsAIModalOpen(false)} title="AI 专家选品解析" maxWidth="max-w-4xl">
+        <div className="space-y-6">
+          <div className="bg-[#FDFCF8] p-6 rounded-[32px] border border-[#E5E1D1] shadow-inner space-y-4">
+            <div className="flex items-center gap-3 mb-1">
+               <div className="p-3 bg-gradient-to-br from-[#1B4332] to-[#2D5A47] rounded-2xl text-white shadow-lg">
+                  <BrainCircuit size={24} className="animate-pulse" />
+               </div>
+               <div>
+                  <h4 className="text-sm font-bold text-[#1B4332] uppercase tracking-widest">智能选品工作台</h4>
+                  <p className="text-[10px] text-[#B08D57] font-medium italic">基于神经网络检索，为您的客户定制最佳礼赠组合</p>
+               </div>
+            </div>
+            <div className="flex gap-4">
+              <textarea 
+                placeholder="描述项目背景，如：某大型央企年会，需要宋韵风格礼品，倾向于茶器与文房组合，预算敏感..." 
+                className="flex-1 h-32 px-5 py-4 bg-white border border-[#E5E1D1] rounded-[24px] outline-none text-xs resize-none shadow-sm focus:ring-4 focus:ring-[#1B4332]/5 transition-all placeholder:text-gray-300" 
+                value={aiRequirement} 
+                onChange={(e) => setAIRequirement(e.target.value)} 
+              />
+              <button 
+                onClick={handleAIRecommendation} 
+                disabled={isAIThinking || !aiRequirement.trim()} 
+                className="w-32 bg-[#1B4332] text-white rounded-[24px] font-black flex flex-col items-center justify-center gap-3 transition-all active:scale-95 shadow-2xl disabled:opacity-50 disabled:scale-100 hover:bg-[#2D5A47] relative overflow-hidden group/btn"
+              >
+                {isAIThinking ? <Loader2 className="animate-spin" size={32} /> : <Sparkles size={40} className="text-amber-400 drop-shadow-lg group-hover/btn:scale-110 transition-transform" />}
+                <span className="text-[11px] uppercase tracking-tighter">{isAIThinking ? '深度检索' : '开始智能解析'}</span>
+                <div className="absolute inset-0 bg-white/10 opacity-0 group-hover/btn:opacity-100 transition-opacity" />
               </button>
             </div>
+          </div>
+
           {aiRecommendations.length > 0 && (
-            <div className="space-y-3">
-              {aiRecommendations.map((rec, i) => {
-                const p = products.find(prod => prod.id === rec.productId);
-                if (!p) return null;
-                return (
-                  <div key={i} className="bg-white border p-3 rounded-xl flex gap-3 group hover:border-[#1B4332] transition-colors shadow-sm">
-                    <ProductImage src={p.image} className="w-12 h-12 rounded-lg object-cover border" />
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-bold text-xs text-[#1B4332] truncate">{p.name}</h4>
-                      <p className="text-[10px] text-gray-400 mt-1 italic leading-tight">"{rec.reason}"</p>
+            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-8 duration-700">
+              <div className="flex items-center justify-between px-3">
+                <div className="flex items-center gap-3">
+                   <TrendingUp size={18} className="text-[#B08D57]"/>
+                   <span className="text-xs font-bold text-[#1B4332] uppercase tracking-widest">推荐方案 (匹配度优先排序)</span>
+                </div>
+                <div className="flex gap-2">
+                   <button onClick={applyAllRecommendations} className="px-4 py-1.5 bg-[#1B4332]/5 text-[#1B4332] border border-[#1B4332]/10 rounded-full text-[10px] font-bold hover:bg-[#1B4332] hover:text-white transition-all shadow-sm">一键采纳前三</button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {aiRecommendations.map((rec, i) => {
+                  const p = products.find(prod => prod.id === rec.productId);
+                  if (!p) return null;
+                  const scoreColor = rec.confidence >= 90 ? 'text-green-600 bg-green-50' : 'text-amber-600 bg-amber-50';
+                  
+                  return (
+                    <div key={i} className="bg-white border border-[#E5E1D1] p-4 rounded-[24px] flex gap-4 group hover:border-[#1B4332] transition-all shadow-sm hover:shadow-xl relative overflow-hidden">
+                      <div className={`absolute top-0 right-0 px-4 py-1.5 ${scoreColor} text-[10px] font-black rounded-bl-[20px] shadow-sm flex items-center gap-1`}>
+                        <ThumbsUp size={10} /> {rec.confidence}% 匹配
+                      </div>
+                      <div className="relative shrink-0">
+                         <ProductImage src={p.image} className="w-20 h-20 rounded-[20px] object-cover border" />
+                         <button 
+                            onClick={(e) => { e.stopPropagation(); applySingleRecommendation(p.id); }}
+                            className="absolute -bottom-1 -right-1 bg-[#1B4332] text-white p-1.5 rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                         >
+                            <Plus size={14}/>
+                         </button>
+                      </div>
+                      <div className="flex-1 min-w-0 pr-16 pt-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <h4 className="font-bold text-sm text-[#1B4332] truncate">{p.name}</h4>
+                        </div>
+                        <div className="flex gap-2 mb-2">
+                          <span className="text-[9px] px-1.5 py-0.5 bg-gray-50 border border-gray-100 rounded text-gray-400 font-bold uppercase">{p.category}</span>
+                          <span className="text-[9px] text-[#B08D57] font-black">¥{p.retailPrice} 零售</span>
+                        </div>
+                        <p className="text-[10px] text-gray-500 leading-snug italic line-clamp-2 bg-gray-50/50 p-2 rounded-xl">"{rec.reason}"</p>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-              <button onClick={applyAIRecommendation} className="w-full py-3.5 bg-[#1B4332] text-white rounded-xl font-bold text-xs shadow-xl active:scale-95 transition-all">一键采纳AI建议配置</button>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -860,7 +950,7 @@ function App() {
                  <input type="number" className="w-full px-5 py-4 bg-[#F9F7F2] border border-[#E5E1D1] rounded-2xl font-black text-2xl outline-none focus:ring-2 focus:ring-[#1B4332] shadow-inner" value={tierForm.targetPrice} onChange={(e) => setTierForm({...tierForm, targetPrice: e.target.value})} />
                </div>
                <div>
-                 <label className="text-[10px] font-bold text-gray-400 block mb-2 uppercase tracking-widest">产品选品折率 (%)</label>
+                 <label className="text-[10px] font-bold text-gray-400 block mb-2 uppercase tracking-widest">选品平均折率 (%)</label>
                  <input type="number" className="w-full px-5 py-3 bg-[#F9F7F2] border border-[#E5E1D1] rounded-xl text-sm font-bold" value={tierForm.discount} onChange={(e) => setTierForm({...tierForm, discount: e.target.value})} />
                </div>
                <div>
@@ -939,6 +1029,12 @@ function App() {
         .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #E5E1D1; border-radius: 10px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        
+        @keyframes subtle-pulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.8; transform: scale(0.98); }
+        }
+        .ai-pulse { animation: subtle-pulse 2s infinite ease-in-out; }
       `}</style>
     </div>
   );
