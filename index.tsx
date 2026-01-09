@@ -39,7 +39,9 @@ import {
   Cpu,
   Activity,
   Globe,
-  Server
+  Server,
+  ArrowUpDown,
+  Filter
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 
@@ -96,7 +98,7 @@ interface AIConfig {
 const STORAGE_KEY_PRODUCTS = 'SHANSHUI_DB_PRODUCTS_V25';
 const STORAGE_KEY_GIFTSETS = 'SHANSHUI_DB_GIFTSETS_V25';
 const STORAGE_KEY_AUTH = 'SHANSHUI_AUTH_V1';
-const STORAGE_KEY_AI_CONFIG = 'SHANSHUI_AI_CONFIG_V2'; // Bumped version for new schema
+const STORAGE_KEY_AI_CONFIG = 'SHANSHUI_AI_CONFIG_V2';
 
 const LOGO_URL = "https://img.lenyiin.com/app/hide.php?key=S0d4Y1N4YThGNkRHbnV4U1lrL1BBMDVncmc1Q1ZhZkZPR2c4dUg0PQ==";
 
@@ -129,7 +131,7 @@ function Modal({ isOpen, onClose, title, children, maxWidth = "max-w-md" }: { is
             <X size={18} />
           </button>
         </div>
-        <div className="p-6 overflow-y-auto custom-scrollbar flex-1">
+        <div className="p-6 overflow-y-auto custom-scrollbar flex-1 min-h-0">
           {children}
         </div>
       </div>
@@ -259,6 +261,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeCategory, setActiveCategory] = useState('全部');
   const [sortBy, setSortBy] = useState<'default' | 'price-asc' | 'price-desc'>('default');
+  const [profitFilter, setProfitFilter] = useState<'all' | 'high'>('all'); // all, high (>30%)
   const [lastAddedId, setLastAddedId] = useState<string | null>(null);
   const [hoveredImage, setHoveredImage] = useState<{url: string, x: number, y: number} | null>(null);
 
@@ -287,12 +290,24 @@ function App() {
 
   const categories = useMemo(() => ['全部', ...Array.from(new Set(products.map(p => p.category).filter(Boolean)))], [products]);
   const currentSet = useMemo(() => giftSets.find(s => s.id === currentSetId) || null, [giftSets, currentSetId]);
+  const activeTier = useMemo(() => currentSet?.tiers.find(t => t.id === activeTierId) || null, [currentSet, activeTierId]);
 
   const sortedFilteredProducts = useMemo(() => {
     let result = [...products].filter(p => {
       const match = (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
                     (p.sku || '').toLowerCase().includes(searchTerm.toLowerCase());
       const catMatch = activeCategory === '全部' || p.category === activeCategory;
+      
+      // 利润率筛选逻辑
+      if (profitFilter === 'high' && activeTier) {
+        const discountRateDecimal = activeTier.discountRate / 100;
+        const revenue = p.retailPrice * discountRateDecimal;
+        const cost = p.platformPrice + activeTier.boxCost + activeTier.laborCost + activeTier.logisticsCost;
+        const profit = revenue - cost;
+        const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
+        if (margin < 30) return false;
+      }
+      
       return match && catMatch;
     });
     
@@ -300,7 +315,7 @@ function App() {
     else if (sortBy === 'price-desc') result.sort((a, b) => b.retailPrice - a.retailPrice);
     
     return result;
-  }, [searchTerm, activeCategory, sortBy, products]);
+  }, [searchTerm, activeCategory, sortBy, profitFilter, products, activeTier]);
 
   const handleImageHover = (url: string | null, e: React.MouseEvent) => {
     if (!url) {
@@ -622,7 +637,6 @@ function App() {
         });
         data = JSON.parse(response.text || '{}');
       } else {
-        // DeepSeek API Calling (OpenAI compatible)
         const response = await fetch(`${aiConfig.deepseekBaseUrl}/v1/chat/completions`, {
           method: 'POST',
           headers: {
@@ -728,16 +742,46 @@ function App() {
 
       <main className="flex-1 flex overflow-hidden">
         {currentSet && (
-          <aside className="w-[300px] border-r border-[#E5E1D1] bg-white flex flex-col shrink-0 z-20 shadow-xl">
-            <div className="p-2.5 space-y-2 border-b border-[#F5F2E8]">
+          <aside className="w-[300px] border-r border-[#E5E1D1] bg-white flex flex-col shrink-0 z-20 shadow-xl overflow-hidden">
+            <div className="p-2.5 space-y-2 border-b border-[#F5F2E8] shrink-0">
               <div className="relative">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" size={12} />
                 <input type="text" placeholder="搜索品名/SKU..." className="w-full pl-7 pr-3 py-1.5 bg-[#F9F7F2] border border-[#E5E1D1] rounded-lg text-xs outline-none" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
               </div>
               <FilterRow label="分类" icon={Layers} items={categories} activeItem={activeCategory} onSelect={setActiveCategory} />
+              
+              {/* 排序与高级筛选 */}
+              <div className="flex flex-col gap-2 pt-1 border-t border-gray-50">
+                <div className="flex items-center gap-1.5 px-1">
+                  <ArrowUpDown size={10} className="text-[#B08D57]" />
+                  <span className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">排序与利润筛选</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <button 
+                    onClick={() => setSortBy(sortBy === 'price-asc' ? 'default' : 'price-asc')}
+                    className={`px-2 py-1 rounded-lg text-[8px] font-bold transition-all border flex items-center gap-1 ${sortBy === 'price-asc' ? 'bg-[#1B4332] text-white border-[#1B4332]' : 'bg-white text-gray-400 border-gray-100 hover:border-[#1B4332]'}`}
+                  >
+                    价格 ↑
+                  </button>
+                  <button 
+                    onClick={() => setSortBy(sortBy === 'price-desc' ? 'default' : 'price-desc')}
+                    className={`px-2 py-1 rounded-lg text-[8px] font-bold transition-all border flex items-center gap-1 ${sortBy === 'price-desc' ? 'bg-[#1B4332] text-white border-[#1B4332]' : 'bg-white text-gray-400 border-gray-100 hover:border-[#1B4332]'}`}
+                  >
+                    价格 ↓
+                  </button>
+                  <button 
+                    onClick={() => setProfitFilter(profitFilter === 'high' ? 'all' : 'high')}
+                    className={`px-2 py-1 rounded-lg text-[8px] font-bold transition-all border flex items-center gap-1 ${profitFilter === 'high' ? 'bg-[#B08D57] text-white border-[#B08D57]' : 'bg-white text-gray-400 border-gray-100 hover:border-[#B08D57]'}`}
+                    title="筛选利润率 > 30% 的单品"
+                  >
+                    <Percent size={8} /> 利润 > 30%
+                  </button>
+                </div>
+              </div>
             </div>
+            
             <div className="flex-1 overflow-y-auto p-2.5 space-y-2 custom-scrollbar bg-[#FDFCF8]/30">
-              {sortedFilteredProducts.map(p => {
+              {sortedFilteredProducts.length > 0 ? sortedFilteredProducts.map(p => {
                 const isAIRec = aiRecommendations.some(r => r.productId === p.id);
                 return (
                   <div 
@@ -760,7 +804,12 @@ function App() {
                     {activeTierId && <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1B4332] text-white p-0.5 rounded-full"><Plus size={10}/></div>}
                   </div>
                 );
-              })}
+              }) : (
+                <div className="py-10 text-center space-y-2 opacity-40">
+                  <Search size={24} className="mx-auto text-gray-300" />
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">未找到匹配选品</p>
+                </div>
+              )}
             </div>
           </aside>
         )}
@@ -772,7 +821,7 @@ function App() {
                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {giftSets.map(set => (
                   <div key={set.id} onClick={() => setCurrentSetId(set.id)} className="group bg-white rounded-[24px] border border-[#E5E1D1] p-6 shadow-sm hover:shadow-xl hover:border-[#1B4332] transition-all cursor-pointer relative overflow-hidden">
-                    <button onClick={(e) => handleDeleteSet(set.id, e)} className="absolute top-3 right-3 p-1.5 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={14}/></button>
+                    <button onClick={(e) => { e.stopPropagation(); if(confirm('确定删除此方案？')) handleDeleteSet(set.id, e); }} className="absolute top-3 right-3 p-1.5 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={14}/></button>
                     <h3 className="text-lg font-serif font-bold text-[#1B4332] group-hover:text-[#B08D57] transition-colors">{set.name}</h3>
                     <p className="text-[9px] text-gray-300 mt-3 uppercase tracking-wider">{new Date(set.createdAt).toLocaleDateString()} 创建</p>
                   </div>
@@ -1175,10 +1224,19 @@ function App() {
               <input type="file" ref={fileInputRef} accept=".csv" className="hidden" onChange={handleFileUpload} />
               <button onClick={() => setProducts([{ id: Date.now().toString() + Math.random().toString(36).substr(2, 5), sku: 'NEW-'+Math.floor(Math.random()*1000), name: '待完善新选品', spec: '', unit: '件', platformPrice: 0, channelPrice: 0, retailPrice: 0, image: '', manufacturer: '', category: '默认' }, ...products])} className="bg-white border border-[#E5E1D1] text-[#1B4332] px-6 py-3 rounded-2xl font-bold text-xs hover:border-[#1B4332] transition-all shadow-sm">手动录入单品</button>
            </div>
-           <div className="border border-[#E5E1D1] rounded-[28px] overflow-hidden bg-white shadow-inner flex-1 overflow-auto custom-scrollbar">
+           
+           {/* 修复滚动：确保父容器 flex-1 并具有 min-h-0 以及 overflow-auto */}
+           <div className="border border-[#E5E1D1] rounded-[28px] bg-white shadow-inner flex-1 min-h-0 overflow-auto custom-scrollbar relative">
               <table className="w-full text-left border-collapse min-w-[1200px]">
-                <thead className="bg-[#FDFCF8] text-[10px] font-bold text-[#B08D57] border-b sticky top-0 uppercase tracking-widest z-10 shadow-sm">
-                  <tr><th className="px-6 py-4">SKU编码</th><th className="px-6 py-4">选品名称</th><th className="px-6 py-4">采购价 (成本)</th><th className="px-6 py-4">市场零售价</th><th className="px-6 py-4">分类/属性</th><th className="px-8 py-4 text-right">管理</th></tr>
+                <thead className="bg-[#FDFCF8] text-[10px] font-bold text-[#B08D57] border-b sticky top-0 uppercase tracking-widest z-20 shadow-sm">
+                  <tr>
+                    <th className="px-6 py-4 bg-[#FDFCF8]">SKU编码</th>
+                    <th className="px-6 py-4 bg-[#FDFCF8]">选品名称</th>
+                    <th className="px-6 py-4 bg-[#FDFCF8]">采购价 (成本)</th>
+                    <th className="px-6 py-4 bg-[#FDFCF8]">市场零售价</th>
+                    <th className="px-6 py-4 bg-[#FDFCF8]">分类/属性</th>
+                    <th className="px-8 py-4 text-right bg-[#FDFCF8]">管理</th>
+                  </tr>
                 </thead>
                 <tbody className="divide-y divide-[#F5F2E8]">
                   {products.map(p => (
