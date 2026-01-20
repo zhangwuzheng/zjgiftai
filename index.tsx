@@ -227,11 +227,22 @@ function App() {
 
   const [aiConfig, setAIConfig] = useState<AIConfig>(() => {
     const saved = localStorage.getItem(STORAGE_KEY_AI_CONFIG);
-    return saved ? JSON.parse(saved) : { 
+    const defaultDeepSeekKey = 'sk-5d5494bf6a3b4a36ad641a4432d14846';
+    
+    if (saved) {
+      const config = JSON.parse(saved);
+      // Ensure default key is set if missing
+      if (!config.deepseekKey) {
+        config.deepseekKey = defaultDeepSeekKey;
+      }
+      return config;
+    }
+    
+    return { 
       provider: 'gemini',
       model: 'gemini-3-flash-preview', 
       temperature: 0.7,
-      deepseekKey: '',
+      deepseekKey: defaultDeepSeekKey,
       deepseekBaseUrl: 'https://api.deepseek.com',
       deepseekModel: 'deepseek-chat'
     };
